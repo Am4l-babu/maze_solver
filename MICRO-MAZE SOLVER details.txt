@@ -1,0 +1,758 @@
+# MICRO-MAZE SOLVER ROBOT
+## Comprehensive Technical Specification & Firmware Development Prompt
+
+---
+
+## 1. PROJECT OVERVIEW
+
+A custom-built, autonomous micro-maze solving robot designed for the **IEEE RAS SBC GECT Maze Solver Competition (July 2026)**. The robot must navigate a maze of tight corridors and straightaways, balancing high straight-line speed with precision active braking and junction detection.
+
+**Design Philosophy:** Maximum sensor awareness at the front, compact footprint, modular 3-tier deck architecture, and a unified single-battery power system with clean voltage regulation.
+
+---
+
+## 2. COMPETITION CONTEXT & CONSTRAINTS
+
+| Parameter | Specification |
+|---|---|
+| **Event** | IEEE RAS SBC GECT Maze Solver, July 2026 |
+| **Max Footprint** | 130 × 130 mm |
+| **Robot Dimensions** | 120 mm (W) × 125 mm (L) × 55 mm (H) |
+| **Typical Maze Cell** | ~180 × 180 mm (verify with specific rules) |
+| **Wall Height** | Typically 50–80 mm |
+| **Drive Type** | Differential drive (rear wheels, front caster) |
+| **Target** | Center cell of the maze |
+| **Run Structure** | Exploration run → Path computation → Fast optimal run |
+
+---
+
+## 3. HARDWARE ARCHITECTURE
+
+### 3.1 Central Processing Unit — Seeed Studio XIAO ESP32S3
+
+| Feature | Detail |
+|---|---|
+| **Chip** | ESP32-S3 (dual-core Xtensa LX7 @ up to 240 MHz) |
+| **Memory** | 8 MB PSRAM + 8 MB (or 16 MB) Flash |
+| **Logic Level** | 3.3 V |
+| **Key Peripherals** | 2× UART, 1× I²C, 1× I²S, 2× SPI, 11× GPIO (PWM), 9× ADC, PCNT (Pulse Counter for hardware encoder decoding) |
+| **Wireless** | WiFi + Bluetooth 5 (LE) — useful for telemetry/tuning, disable during competition |
+
+### 3.2 Sensor Array — 5× TOF200C (VL53L0X-based)
+
+| Sensor | Angle | Role |
+|---|---|---|
+| TOF-0 | −90° | Left wall |
+| TOF-1 | −45° | Diag-Left (junction detection) |
+| TOF-2 | 0° | Front wall / dead-end detection |
+| TOF-3 | +45° | Diag-Right (junction detection) |
+| TOF-4 | +90° | Right wall |
+
+- All sensors use 940 nm VCSEL (eye-safe).
+- **Custom 3D-printed 15° blinders** on −45°, 0°, and +45° sensors to prevent optical cross-talk.
+- Operating voltage: 3.3–5 V (has built-in 2.8 V LDO).
+- I²C default address: `0x29` (all five share the same address — see §3.3 for resolution).
+
+### 3.3 I²C Communication Infrastructure
+
+This is the most critical design decision. You have **three I²C devices** sharing one bus:
+
+```
+XIAO ESP32S3 (D4=SDA/GPIO5, D5=SCL/GPIO6)
+│
+├─── MCP23017 I/O Expander  (Addr: 0x20)
+│     └─ Used for motor direction pins, standby, and possibly sensor XSHUT lines
+│
+└─── PCA9548A I²C Multiplexer (Addr: 0x70)
+      ├── CH0 → TOF Sensor 0 (−90°)
+      ├── CH1 → TOF Sensor 1 (−45°)
+      ├── CH2 → TOF Sensor 2 (0° Center)
+      ├── CH3 → TOF Sensor 3 (+45°)
+      └── CH4 → TOF Sensor 4 (+90°)
+```
+
+**Why the PCA9548A is essential:** All five VL53L0X sensors share the same default I²C address (`0x29`). Without the multiplexer, you'd have to toggle XSHUT pins to re-address each sensor at startup — slow, fragile, and wastes 5 MCP23017 pins. The PCA9548A isolates each sensor on its own bus segment, letting them all keep `0x29`.
+
+**I²C Speed:** Configure for **400 kHz (Fast Mode)**. Total bus capacitance is well under the 400 pF limit.
+
+### 3.4 Drivetrain & Mobility
+
+| Component | Specification |
+|---|---|
+| **Motors** | 2× N20 12V DC metal gear motors |
+| **Gear Ratio** | **⚠️ DISCREPANCY — see §10** (listed as both 100:1 and 150:1) |
+| **No-Load Speed** | 200 RPM (output shaft) |
+| **Rated Torque** | 1.0 kg-cm |
+| **Stall Torque** | 7 kg-cm |
+| **Stall Current** | 1 A per motor |
+| **Encoder** | 3 PPR (magnetic, pre-gearbox) → **450 CPR at output** (if 150:1) |
+| **Wheels** | 43 mm diameter × 8 mm width, 3 mm D-shaft |
+| **Caster** | 12 mm steel ball bearing, front-mounted |
+
+**Calculated Performance:**
+- Wheel circumference: π × 43 = 135.1 mm
+- Theoretical top speed (at 300 RPM output): **~0.67 m/s** ✓
+- Distance per encoder count: 135.1 / 450 = **0.30 mm/count** — excellent resolution
+- ⚠️ At 200 RPM output: speed is only ~0.45 m/s — verify actual motor RPM
+
+### 3.5 Motor Driver — TB6612FNG
+
+| Pin | Function | Connection |
+|---|---|---|
+| VMOT | Motor power (up to 13.5 V) | Direct from 3S LiPo (~11.1 V nominal, 12.6 V full) |
+| VCC | Logic power (2.7–5.5 V) | From 5 V buck converter |
+| PWMA / PWMB | PWM speed control (up to 100 kHz) | XIAO GPIO (hardware PWM) |
+| AIN1, AIN2 | Motor A direction | **MCP23017 pins** (saves XIAO GPIOs) |
+| BIN1, BIN2 | Motor B direction | **MCP23017 pins** |
+| STBY | Standby (active low) | **MCP23017 pin** |
+| AO1/AO2 | Motor A outputs | To left motor |
+| BO1/BO2 | Motor B outputs | To right motor |
+
+**Active Braking Feature:** Setting both direction pins low (e.g., AIN1=LOW, AIN2=LOW) engages **short-brake mode**, which shorts the motor terminals through the low-side MOSFETs — providing strong regenerative braking. This is critical for precision stopping at junctions.
+
+### 3.6 Power Distribution (Unified 3S)
+
+```
+┌─────────────────────────────────────────────────┐
+│  Pro-Range 3S 11.1V 1000mAh 40C LiPo           │
+│  (XT-60 connector, JST-XH balance port)         │
+└───────────────────┬─────────────────────────────┘
+                    │
+         ┌──────────┴──────────┐
+         │                     │
+    ┌────▼─────┐        ┌──────▼──────────┐
+    │ TB6612FNG│        │ MP1584EN Buck   │
+    │ VMOT pin │        │ 11.1V → 5.0V    │
+    │ (Motors) │        │ (<30mV ripple)  │
+    └──────────┘        └──────┬──────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │ XIAO ESP32S3 (5V pin)│
+                    │ → Onboard LDO → 3.3V │
+                    │                      │
+                    │ Powers:              │
+                    │ • ESP32 logic        │
+                    │ • MCP23017           │
+                    │ • PCA9548A           │
+                    │ • 5× TOF200C sensors │
+                    │ • TB6612FNG logic    │
+                    └──────────────────────┘
+```
+
+**⚠️ CRITICAL CLARIFICATION:** You mentioned "ESP powered by 3.3 V battery and motors on 11 V battery." This is a **single-battery system**. The 3.3 V for the ESP32 is generated internally by the XIAO's onboard LDO from the 5 V buck converter output. There is no separate 3.3 V battery.
+
+**Charging:** ImaxRC B3 Pro 20 W balance charger via the 4-pin JST-XH balance plug.
+
+---
+
+## 4. MECHANICAL DESIGN
+
+### 4.1 Chassis Specifications
+- **Fabrication:** Fusion 360 → Creality Ender 3 Pro → PETG / PLA+
+- **Footprint:** 120 × 125 × 55 mm (within 130 × 130 limit)
+- ⚠️ **Height Warning:** 55 mm may exceed typical wall heights (often 50 mm). Verify competition rules.
+
+### 4.2 Three-Tier Deck Architecture
+
+```
+Z = 35–38 mm ─ TOP DECK
+  ├─ Sensor bumper (5× TOF200C with blinders)
+  └─ 3S LiPo battery (center-strapped for CG)
+
+Z = 20–23 mm ─ MID DECK (Electronics)
+  ├─ XIAO ESP32S3
+  ├─ TB6612FNG motor driver
+  ├─ MP1584EN buck converter
+  ├─ MCP23017 I/O expander
+  └─ PCA9548A I²C multiplexer
+
+Z = 0–8 mm ─ BOTTOM DECK
+  ├─ 2× N20 motors (rear-mounted)
+  ├─ 2× 43 mm wheels
+  └─ 12 mm front caster
+```
+
+### 4.3 Weight Distribution Strategy
+- Battery centered on top deck → low CG, balanced mass
+- Electronics on mid deck → easy access for debugging
+- Motors/wheels on bottom → lowest possible CG
+- Front caster provides third support point
+
+---
+
+## 5. ELECTRICAL PIN MAPPING
+
+### 5.1 XIAO ESP32S3 Pin Allocation
+
+| XIAO Pin | GPIO | Assigned Function | Notes |
+|---|---|---|---|
+| **D0** | GPIO1 | **PWMA** (Motor A PWM) | Hardware PWM channel |
+| **D1** | GPIO2 | **PWMB** (Motor B PWM) | Hardware PWM channel |
+| **D2** | GPIO3 | **Encoder A – Channel A** | PCNT input (left motor) |
+| **D3** | GPIO4 | **Encoder A – Channel B** | PCNT input (left motor) |
+| **D4** | GPIO5 | **I²C SDA** | Shared bus |
+| **D5** | GPIO6 | **I²C SCL** | Shared bus |
+| **D6** | GPIO43 | **Encoder B – Channel A** | PCNT input (right motor) |
+| **D7** | GPIO44 | **Encoder B – Channel B** | PCNT input (right motor) |
+| **D8** | GPIO7 | **Battery Voltage ADC** | Via 30 kΩ + 10 kΩ divider |
+| **D9** | GPIO8 | **Status LED / Buzzer** | Debug feedback |
+| **D10** | GPIO9 | **Start Button** | Pull-up, active low |
+| **D11** | GPIO42 | *Spare* | Future expansion |
+| **D12** | GPIO41 | *Spare* | Future expansion |
+
+### 5.2 MCP23017 Pin Allocation (I²C Addr: 0x20)
+
+| Port | Pin | Function |
+|---|---|---|
+| GPA0 | AIN1 | Motor A Direction 1 |
+| GPA1 | AIN2 | Motor A Direction 2 |
+| GPA2 | BIN1 | Motor B Direction 1 |
+| GPA3 | BIN2 | Motor B Direction 2 |
+| GPA4 | STBY | TB6612FNG Standby (active low) |
+| GPA5–GPA7 | *Spare* | Future expansion |
+| GPB0–GPB3 | *Spare* | Could be used for sensor XSHUT if needed |
+| **INTA/INTB** | — | → XIAO GPIO (interrupt on pin change) |
+
+### 5.3 PCA9548A Channel Mapping (I²C Addr: 0x70)
+
+| Channel | Sensor | Angle |
+|---|---|---|
+| CH0 | TOF-0 | −90° Left |
+| CH1 | TOF-1 | −45° Diag-Left |
+| CH2 | TOF-2 | 0° Center |
+| CH3 | TOF-3 | +45° Diag-Right |
+| CH4 | TOF-4 | +90° Right |
+| CH5–CH7 | *Spare* | — |
+
+---
+
+## 6. FIRMWARE ARCHITECTURE (C++ / PlatformIO)
+
+### 6.1 Recommended Project Structure
+
+```
+maze-solver-firmware/
+├── src/
+│   ├── main.cpp              // setup(), loop(), task scheduling
+│   ├── config.h              // Pin definitions, constants, tuning params
+│   ├── pid_controller.h/cpp  // Generic PID class
+│   ├── sensor_array.h/cpp    // PCA9548A + VL53L0X management
+│   ├── motor_driver.h/cpp    // TB6612FNG + MCP23017 interface
+│   ├── encoder.h/cpp         // PCNT-based hardware encoder reading
+│   ├── maze_map.h/cpp        // Grid representation + flood fill
+│   ├── navigator.h/cpp       // Path execution, junction detection
+│   ├── state_machine.h/cpp   // Robot state management
+│   └── watchdog.h/cpp        // Safety watchdog timer
+├── lib/
+│   ├── Adafruit_VL53L0X/     // Or custom VL53L0X driver
+│   ├── Adafruit_MCP23017/
+│   └── PCA9548A/
+└── platformio.ini
+```
+
+### 6.2 System State Machine
+
+```
+┌──────┐    ┌──────────────┐    ┌────────────┐
+│ IDLE │───▶│ CALIBRATING  │───▶│ EXPLORING  │
+└──────┘    └──────────────┘    └─────┬──────┘
+    ▲                                 │
+    │         ┌──────────┐            ▼
+    └─────────│ FAST_RUN │◀───┌───────────┐
+              └──────────┘    │ SOLVING   │
+                              └───────────┘
+```
+
+| State | Description |
+|---|---|
+| **IDLE** | Waiting for start button. Low-power mode. |
+| **CALIBRATING** | Zero encoders, calibrate TOF offsets, check battery voltage. |
+| **EXPLORING** | Navigate maze at moderate speed, build map, reach target. |
+| **SOLVING** | Run flood-fill algorithm, compute optimal path. |
+| **FAST_RUN** | Execute optimal path at maximum speed with active braking. |
+
+### 6.3 Real-Time Control Loop (Target: 100 Hz)
+
+```cpp
+void loop() {
+    // 1. Read sensors (~5-10 ms with PCA9548A + continuous mode)
+    sensors.readAll();
+    
+    // 2. Read encoders (hardware PCNT - near-instant)
+    encoders.update();
+    
+    // 3. Update state machine
+    stateMachine.update();
+    
+    // 4. Detect junctions / walls
+    navigator.perception(sensors.getData());
+    
+    // 5. Compute PID outputs
+    float leftPWM  = speedPID_L.compute(targetSpeed_L, encoders.getLeftSpeed());
+    float rightPWM = speedPID_R.compute(targetSpeed_R, encoders.getRightSpeed());
+    float steering = steeringPID.compute(desiredPosition, sensors.getPositionError());
+    
+    // 6. Apply differential drive mixing
+    motorDriver.setLeft(leftPWM  + steering);
+    motorDriver.setRight(rightPWM - steering);
+    
+    // 7. Safety checks
+    watchdog.reset();
+    checkBatteryVoltage();
+    
+    // Maintain 100 Hz
+    delayUntil(10); // ms
+}
+```
+
+---
+
+## 7. PID CONTROL STRATEGY
+
+### 7.1 Generic PID Controller Class
+
+```cpp
+class PIDController {
+private:
+    float Kp, Ki, Kd;
+    float integral = 0;
+    float prevError = 0;
+    float outputMin, outputMax;
+    unsigned long lastTime = 0;
+
+public:
+    PIDController(float kp, float ki, float kd, float outMin, float outMax)
+        : Kp(kp), Ki(ki), Kd(kd), outputMin(outMin), outputMax(outMax) {}
+
+    float compute(float setpoint, float measurement) {
+        unsigned long now = millis();
+        float dt = (now - lastTime) / 1000.0;
+        lastTime = now;
+        if (dt <= 0) dt = 0.01;
+
+        float error = setpoint - measurement;
+        
+        // Integral with anti-windup
+        integral += error * dt;
+        integral = constrain(integral, outputMin / Ki, outputMax / Ki);
+        
+        // Derivative (with optional filtering)
+        float derivative = (error - prevError) / dt;
+        prevError = error;
+        
+        float output = Kp * error + Ki * integral + Kd * derivative;
+        return constrain(output, outputMin, outputMax);
+    }
+
+    void reset() {
+        integral = 0;
+        prevError = 0;
+    }
+    
+    void setTunings(float kp, float ki, float kd) {
+        Kp = kp; Ki = ki; Kd = kd;
+    }
+};
+```
+
+### 7.2 Motor Speed PID (Inner Loop — per motor)
+
+- **Input:** Encoder-measured speed (counts/sec or mm/s)
+- **Setpoint:** Desired speed from motion planner
+- **Output:** PWM duty cycle (−255 to +255)
+- **Rate:** 100–500 Hz
+- **Tuning approach:** Start with Kp only → add Ki for steady-state error → add Kd for overshoot damping.
+- ⚠️ **Gain Scheduling:** Consider different PID gains for low-speed (precision) vs. high-speed (stability) regimes. Battery voltage also affects available torque — consider voltage compensation.
+
+### 7.3 Wall-Following / Steering PID (Outer Loop)
+
+```
+Error = f(left_wall_dist, right_wall_dist, diag_sensors)
+
+For centered corridor following:
+  error = (left_dist - right_dist) / 2.0
+
+For wall-following (e.g., keep 50mm from right wall):
+  error = 50.0 - right_dist
+```
+
+- **Output:** Differential speed adjustment (added to left, subtracted from right)
+- **Tuning:** Start with Kp only. Kd helps damp oscillation in narrow corridors. Ki usually unnecessary.
+
+### 7.4 Active Braking Algorithm
+
+This is a **motion profile**, not just a PID:
+
+```cpp
+void approachJunction(float distanceToWall, float currentSpeed) {
+    // Physics: v² = v₀² + 2·a·d
+    // Required deceleration to stop at target:
+    float requiredDecel = (currentSpeed * currentSpeed) / (2.0 * distanceToWall);
+    
+    // Safety margin: cap deceleration
+    requiredDecel = min(requiredDecel, MAX_DECELERATION);
+    
+    // Target speed at this distance:
+    float targetSpeed = sqrt(2.0 * requiredDecel * distanceToWall);
+    
+    // Feed this target to the speed PID
+    speedPID_L.setSetpoint(targetSpeed * leftRatio);
+    speedPID_R.setSetpoint(targetSpeed * rightRatio);
+    
+    // If very close, engage short-brake on TB6612FNG
+    if (distanceToWall < STOP_THRESHOLD) {
+        motorDriver.shortBrake();
+    }
+}
+```
+
+### 7.5 Turn Execution
+
+For 90° turns, two strategies:
+
+**Option A — Encoder-Based (simpler):**
+```
+Target counts = (90° / 360°) × wheelbase × π / wheel_circumference × CPR
+Run motors in opposite directions until count reached.
+PID controls turn rate for smoothness.
+```
+
+**Option B — IMU-Based (recommended upgrade):**
+```
+Use gyro yaw rate for closed-loop turn.
+Much more accurate, immune to wheel slip.
+```
+
+---
+
+## 8. MAZE SOLVING ALGORITHM
+
+### 8.1 Maze Representation
+
+```cpp
+struct Cell {
+    bool wallN, wallS, wallE, wallW;  // Known walls
+    bool visited;
+    uint8_t floodDistance;  // Distance from target (from flood fill)
+};
+
+Cell maze[16][16];  // Adjust size per competition rules
+```
+
+### 8.2 Junction Detection Logic
+
+Using the 5-sensor array:
+
+```cpp
+enum JunctionType {
+    STRAIGHT,     // Walls on L/R, open ahead
+    DEAD_END,     // Walls on L/R/Front
+    TURN_LEFT,    // Wall ahead, open left
+    TURN_RIGHT,   // Wall ahead, open right
+    T_JUNCTION,   // Open L/R, wall ahead (or open ahead)
+    CROSSING,     // Open in all directions
+    UNKNOWN
+};
+
+JunctionType detectJunction(SensorData& s) {
+    bool front = s.center < WALL_THRESHOLD;
+    bool left  = s.left   < WALL_THRESHOLD;
+    bool right = s.right  < WALL_THRESHOLD;
+    bool dLeft = s.diagL  < WALL_THRESHOLD;
+    bool dRight= s.diagR  < WALL_THRESHOLD;
+    
+    if (front && left && right) return DEAD_END;
+    if (front && !left && right) return TURN_LEFT;
+    if (front && left && !right) return TURN_RIGHT;
+    if (!front && left && right) return STRAIGHT;
+    // ... more cases using diagonal sensors for early detection
+}
+```
+
+**Diagonal sensors (−45°, +45°) are crucial:** They detect openings *before* the robot reaches the junction, allowing earlier speed adjustments and smoother transitions.
+
+### 8.3 Flood Fill Algorithm
+
+```cpp
+void floodFill(int targetX, int targetY) {
+    // Initialize all cells to MAX_DISTANCE
+    // BFS from target cell outward
+    // Each cell gets distance = min(neighbors) + 1
+    // Walls block propagation
+    
+    Queue<CellCoord> q;
+    q.push({targetX, targetY});
+    maze[targetX][targetY].floodDistance = 0;
+    
+    while (!q.empty()) {
+        auto [x, y] = q.front(); q.pop();
+        uint8_t d = maze[x][y].floodDistance;
+        
+        // Propagate to open neighbors
+        if (!maze[x][y].wallN && y > 0  && maze[x][y-1].floodDistance > d+1) {
+            maze[x][y-1].floodDistance = d+1; q.push({x, y-1});
+        }
+        // ... repeat for S, E, W
+    }
+}
+```
+
+**Decision Rule:** At each cell, move to the adjacent open neighbor with the **lowest flood distance**.
+
+### 8.4 Fast Run Strategy
+
+After exploration:
+1. Run flood fill from current position to target.
+2. Extract optimal path (sequence of moves: F, L, R, U-turn).
+3. **Optimize consecutive turns** (e.g., L+L = straight-with-wide-turn, L+R+L = U-turn shortcut).
+4. Execute at maximum speed with pre-computed braking points.
+
+---
+
+## 9. ⚠️ CRITICAL ISSUES & DISCREPANCIES TO RESOLVE
+
+| # | Issue | Impact | Resolution |
+|---|---|---|---|
+| 1 | **Gear ratio conflict** — listed as both 100:1 and 150:1 | Affects encoder resolution, speed calculations, PID tuning | Physically verify motor label. This changes CPR from 300 to 450. |
+| 2 | **Top speed math** — 200 RPM × 43 mm wheel = 0.45 m/s, not 0.67 m/s | Speed planning, braking distances | Either motor is ~300 RPM at 12 V no-load, or wheel diameter differs. Measure empirically. |
+| 3 | **Height 55 mm vs. typical 50 mm walls** | Robot may be illegal | Verify competition rules. If max height is 50 mm, redesign top deck. |
+| 4 | **I²C voltage levels** — TOF200C powered from 5 V may output 5 V I²C | Could damage XIAO ESP32S3 (3.3 V logic, not 5 V tolerant) | **Power all I²C devices (TOF200C, MCP23017, PCA9548A) from the XIAO's 3.3 V pin.** The TOF200C's onboard regulator will still work (3.3 V in → 2.8 V internal). |
+| 5 | **Single battery clarification** | "3.3 V battery" note is misleading | Confirm: single 3S LiPo → buck → 5 V → XIAO LDO → 3.3 V. No separate 3.3 V battery. |
+| 6 | **TB6612FNG thermal limits** | 1.2 A continuous per channel; 2× stall = 2 A total | Add heatsink, monitor temperature, ensure ventilation in mid deck. |
+| 7 | **Front caster turning geometry** | Point turns may cause front corners to hit walls in 180 mm cells | Use **swept/curved turns** instead of point turns. Tune motion planner for smooth arcs. |
+
+---
+
+## 10. RECOMMENDED IMPROVEMENTS & ENHANCEMENTS
+
+### 10.1 High-Priority Additions
+
+| Improvement | Benefit | Implementation |
+|---|---|---|
+| **IMU (BNO055 or MPU6050)** | Precise heading for turns, drift-free odometry | Add to I²C bus (via PCA9548A CH5). Huge accuracy improvement for 90°/180° turns. |
+| **Battery voltage monitoring** | Low-battery warning, PID voltage compensation | Voltage divider (30 kΩ + 10 kΩ) → D8 ADC. Read every loop. |
+| **Status LED / Buzzer** | Debug state indication without USB | WS2812B NeoPixel on D9, or simple buzzer. |
+| **Start button** | Reliable run triggering | Momentary switch on D10, internal pull-up, debounced. |
+
+### 10.2 Electrical Noise Reduction (CRITICAL for reliability)
+
+DC motors generate massive EMI through brush arcing. Without mitigation, you **will** get I²C errors, encoder glitches, and ADC noise.
+
+| Countermeasure | Where |
+|---|---|
+| **0.1 µF ceramic capacitors** | Solder directly across each motor's terminals |
+| **Ferrite beads** | On each motor wire, close to the motor |
+| **100 µF electrolytic + 0.1 µF ceramic** | Across VMOT rail on TB6612FNG |
+| **0.1 µF decoupling** | Near VCC pin of every IC (MCP23017, PCA9548A, ESP32) |
+| **Twisted pair wiring** | For encoder signals |
+| **4.7 kΩ I²C pull-ups** | On SDA/SCL (stronger 2.2 kΩ if bus is noisy) |
+| **Star grounding** | Separate analog/digital/motor ground returns, joined at one point |
+
+### 10.3 Mechanical & Performance Upgrades
+
+| Upgrade | Benefit |
+|---|---|
+| **Silicone tubing / O-rings on wheels** | Dramatically improves traction over stock plastic wheels |
+| **Lower CG** | Move battery lower, or use thinner decks |
+| **Carbon fiber top deck** | Saves weight, increases rigidity |
+| **Custom PCB** | Replaces hand-wiring; improves reliability and EMI |
+| **Lighter caster housing** | Reduces front mass, improves turn response |
+
+### 10.4 Firmware Enhancements
+
+| Feature | Benefit |
+|---|---|
+| **Watchdog timer (WDT)** | Auto-reset if firmware hangs mid-run |
+| **Telemetry logging** | Log sensor data, encoder counts, PID outputs to flash or via WiFi for post-run analysis |
+| **PID auto-tuning routine** | Step-response test at startup to characterize motors |
+| **Voltage-compensated PWM** | Scale PWM output by `12.0 / batteryVoltage` to maintain consistent behavior as battery drains |
+| **Path optimization** | After flood fill, simplify path (e.g., replace L-R-L with U, eliminate back-and-forth) |
+| **Multiple map support** | Store multiple maze runs for learning |
+
+---
+
+## 11. C++ FIRMWARE TEMPLATE (Core Skeleton)
+
+```cpp
+// ===== config.h =====
+#pragma once
+
+// Pins
+#define PIN_PWM_L     D0   // GPIO1
+#define PIN_PWM_R     D1   // GPIO2
+#define PIN_ENC_LA    D2   // GPIO3  (PCNT)
+#define PIN_ENC_LB    D3   // GPIO4  (PCNT)
+#define PIN_SDA       D4   // GPIO5
+#define PIN_SCL       D5   // GPIO6
+#define PIN_ENC_RA    D6   // GPIO43 (PCNT)
+#define PIN_ENC_RB    D7   // GPIO44 (PCNT)
+#define PIN_BATT_ADC  D8   // GPIO7
+#define PIN_LED       D9   // GPIO8
+#define PIN_START_BTN D10  // GPIO9
+
+// I2C Addresses
+#define ADDR_MCP23017 0x20
+#define ADDR_PCA9548A 0x70
+#define ADDR_VL53L0X  0x29
+
+// PCA9548A Channels
+#define CH_TOF_LEFT   0
+#define CH_TOF_DL     1
+#define CH_TOF_CENTER 2
+#define CH_TOF_DR     3
+#define CH_TOF_RIGHT  4
+
+// Physical constants (VERIFY THESE!)
+#define WHEEL_DIAMETER_MM   43.0
+#define WHEEL_CIRCUMFERENCE (M_PI * WHEEL_DIAMETER_MM)
+#define GEAR_RATIO          150    // ⚠️ Confirm!
+#define ENCODER_PPR         3
+#define CPR_OUTPUT          (ENCODER_PPR * GEAR_RATIO)  // 450
+#define MM_PER_COUNT        (WHEEL_CIRCUMFERENCE / CPR_OUTPUT)
+#define CELL_SIZE_MM        180.0
+#define WHEELBASE_MM        90.0   // Measure this!
+
+// Speed limits
+#define MAX_SPEED_MM_S      670.0
+#define TURN_SPEED_RAD_S    6.0
+
+// PID defaults (TUNE THESE!)
+#define SPEED_KP 2.0
+#define SPEED_KI 5.0
+#define SPEED_KD 0.1
+
+#define STEER_KP 1.5
+#define STEER_KI 0.0
+#define STEER_KD 0.5
+
+
+// ===== main.cpp =====
+#include <Arduino.h>
+#include <Wire.h>
+#include "config.h"
+#include "pid_controller.h"
+#include "sensor_array.h"
+#include "motor_driver.h"
+#include "encoder.h"
+#include "maze_map.h"
+#include "navigator.h"
+#include "state_machine.h"
+
+// Global instances
+PIDController speedPID_L(SPEED_KP, SPEED_KI, SPEED_KD, -255, 255);
+PIDController speedPID_R(SPEED_KP, SPEED_KI, SPEED_KD, -255, 255);
+PIDController steerPID(STEER_KP, STEER_KI, STEER_KD, -100, 100);
+
+SensorArray sensors;
+MotorDriver motors;
+EncoderSystem encoders;
+MazeMap maze;
+Navigator navigator(maze);
+StateMachine stateMachine;
+
+unsigned long lastLoopTime = 0;
+const int LOOP_PERIOD_MS = 10;  // 100 Hz
+
+void setup() {
+    Serial.begin(115200);
+    Wire.begin(PIN_SDA, PIN_SCL);
+    Wire.setClock(400000);  // 400 kHz I2C
+    
+    pinMode(PIN_START_BTN, INPUT_PULLUP);
+    pinMode(PIN_LED, OUTPUT);
+    
+    // Initialize subsystems
+    motors.begin();
+    encoders.begin();
+    sensors.begin();
+    maze.reset();
+    stateMachine.setState(STATE_IDLE);
+    
+    Serial.println("System Ready. Press START button.");
+}
+
+void loop() {
+    unsigned long now = millis();
+    if (now - lastLoopTime < LOOP_PERIOD_MS) return;
+    float dt = (now - lastLoopTime) / 1000.0;
+    lastLoopTime = now;
+    
+    // 1. Sense
+    sensors.readAll();
+    encoders.update();
+    float batteryV = readBatteryVoltage();
+    
+    // 2. State machine
+    stateMachine.update(digitalRead(PIN_START_BTN) == LOW);
+    
+    // 3. Perception
+    navigator.updatePerception(sensors.getData());
+    
+    // 4. Motion planning (depends on state)
+    float targetSpeedL = 0, targetSpeedR = 0;
+    
+    switch (stateMachine.getState()) {
+        case STATE_EXPLORING:
+            navigator.planExploration();
+            targetSpeedL = navigator.getLeftTargetSpeed();
+            targetSpeedR = navigator.getRightTargetSpeed();
+            break;
+            
+        case STATE_FAST_RUN:
+            navigator.planFastRun();
+            targetSpeedL = navigator.getLeftTargetSpeed();
+            targetSpeedR = navigator.getRightTargetSpeed();
+            break;
+            
+        default:
+            motors.brake();
+            return;
+    }
+    
+    // 5. PID control
+    float speedL = encoders.getLeftSpeed_mm_s();
+    float speedR = encoders.getRightSpeed_mm_s();
+    
+    float pwmL = speedPID_L.compute(targetSpeedL, speedL);
+    float pwmR = speedPID_R.compute(targetSpeedR, speedR);
+    
+    // 6. Output
+    motors.setLeft(pwmL);
+    motors.setRight(pwmR);
+    
+    // 7. Telemetry (optional)
+    if (Serial && (now % 100 == 0)) {
+        Serial.printf("Bat:%.2fV L:%.0f R:%.0f Dist:%.0f\n",
+            batteryV, speedL, speedR, sensors.getFrontDist());
+    }
+}
+
+float readBatteryVoltage() {
+    // 30k + 10k divider: Vadc = Vbat * 10/40
+    int raw = analogRead(PIN_BATT_ADC);
+    float vadc = raw * 3.3 / 4095.0;  // ESP32-S3 is 12-bit ADC
+    return vadc * 4.0;  // Multiply by divider ratio
+}
+```
+
+---
+
+## 12. DEVELOPMENT ROADMAP
+
+| Phase | Tasks |
+|---|---|
+| **1. Bring-up** | Verify I²C bus (all devices respond), test each TOF sensor individually, confirm motor direction/braking, verify encoder counting. |
+| **2. Open-loop** | Drive robot with keyboard/serial commands. Verify kinematics (does it drive straight? do turns match encoder counts?). |
+| **3. PID tuning** | Tune speed PID on a single motor (lifted off ground). Then steering PID in a straight corridor. |
+| **4. Sensor fusion** | Calibrate all 5 TOF sensors. Verify junction detection logic in a test maze section. |
+| **5. Exploration** | Implement flood fill. Run exploration in a small known maze. Verify map matches reality. |
+| **6. Fast run** | Implement path optimization and active braking. Tune braking profiles for different speeds. |
+| **7. Competition prep** | Full runs under time pressure. Battery management. Edge cases (slippery floors, dim walls). |
+
+---
+
+## FINAL NOTES
+
+This robot has an excellent foundation: the XIAO ESP32S3 is powerful enough, the 5-TOF sensor array gives superb awareness, and the PCA9548A elegantly solves the I²C address conflict. The main risks are **electrical noise from the motors**, **unverified gear ratio/speed calculations**, and **I²C voltage level compatibility**.
+
+Address the issues in §9 first, implement the EMI countermeasures in §10.2 early, and you will have a highly competitive maze solver.
