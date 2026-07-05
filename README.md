@@ -95,20 +95,52 @@ src/
 ├── main.cpp              ← 100 Hz control loop, state machine
 ├── config.h              ← ALL tuning knobs + physical constants
 ├── pid_controller.*      ← Generic PID (anti-windup, filtered D)
-├── sensor_array.*        ← 5× VL53L0X via PCA9548A mux
+├── sensor_array.*        ← 5× VL53L0X via PCA9548A mux, core-0 task
 ├── motor_driver.*        ← TB6612FNG + MCP23017 direction pins
 ├── encoder.*             ← Hardware PCNT quadrature → mm/s
 ├── navigator.*           ← Corridor centering, braking, pivots
 ├── state_machine.h       ← IDLE/CALIBRATING/RUNNING/FINISHED/FAULT
-└── maze_map.*            ← Flood-fill fallback (unused in PRIM.E mode)
+├── maze_map.*            ← Flood-fill fallback (unused in PRIM.E mode)
+├── i2c_bus.h             ← Cross-core I²C mutex (shared bus, 2 cores)
+└── fast_gpio.h           ← Direct-register GPIO for the hot loop
+
+tests/                    ← Standalone hardware bring-up sketches
+├── README.md             ← Test order, suggestions & upgrades
+├── 01_lidar_single/      ← One bare VL53L0X, no mux
+├── 02_lidar_array/       ← All 5 sensors + PCA9548A mux
+├── 03_motor_encoder/     ← Forward/back/speed, gear-ratio check
+├── 04_oled_display/      ← SSD1306 128×64 status display (new)
+└── 05_push_button/       ← Start-button debounce & wiring
 
 docs/
+├── CONNECTIONS.md        ← Master wiring reference, every pin/wire
 ├── WIRING.md             ← Power tree, pin map, shroud build spec
 ├── REPORT.md             ← Design trade-offs, angle decision, competition plan
 └── (layout blueprints in artifact form)
 
-platformio.ini            ← PlatformIO: XIAO ESP32S3 + pinned libs
+platformio.ini            ← PlatformIO: XIAO ESP32S3 + pinned libs + 5 test envs
 ```
+
+---
+
+## 🧪 Testing & Bring-Up
+
+Before trusting the full robot firmware, prove each subsystem in
+isolation. Five standalone PlatformIO environments live in
+[`tests/`](tests/README.md) — flash one at a time, in order:
+
+```bash
+pio run -e test_lidar_single  -t upload -t monitor   # 1. one bare sensor
+pio run -e test_lidar_array   -t upload -t monitor   # 2. all 5 + mux
+pio run -e test_motor_encoder -t upload -t monitor   # 3. forward/back/speed
+pio run -e test_button        -t upload -t monitor   # 4. start button
+pio run -e test_oled          -t upload -t monitor   # optional: new OLED
+```
+
+See [`tests/README.md`](tests/README.md) for the full test order,
+expected output for each, and a running list of suggested upgrades that
+came out of writing them. Full pin-by-pin wiring for the whole robot —
+including the OLED — lives in [`docs/CONNECTIONS.md`](docs/CONNECTIONS.md).
 
 ---
 
