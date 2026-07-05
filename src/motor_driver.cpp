@@ -1,4 +1,5 @@
 #include "motor_driver.h"
+#include "i2c_bus.h"
 
 static constexpr uint32_t PWM_FREQ_HZ = 20000; // above audible, well under TB6612's 100 kHz
 static constexpr uint8_t  PWM_RES_BITS = 8;
@@ -39,6 +40,10 @@ void MotorDriver::writeDir(bool isLeft, Dir d) {
     Dir& cur = isLeft ? _dirL : _dirR;
     if (cur == d) return;    // skip redundant I2C traffic
     cur = d;
+
+    // The TOF sensor task (core 0) shares this I2C bus — don't let its
+    // mux-select-and-read interleave with this MCP23017 read-modify-write.
+    I2CGuard guard;
 
     uint8_t in1 = isLeft ? MCP_AIN1 : MCP_BIN1;
     uint8_t in2 = isLeft ? MCP_AIN2 : MCP_BIN2;
@@ -83,5 +88,6 @@ void MotorDriver::coast() {
 }
 
 void MotorDriver::standby(bool en) {
+    I2CGuard guard;
     _mcp->digitalWrite(MCP_STBY, en ? LOW : HIGH); // active low
 }

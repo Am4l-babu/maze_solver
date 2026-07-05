@@ -8,6 +8,8 @@
 #include <esp_task_wdt.h>
 
 #include "config.h"
+#include "i2c_bus.h"
+#include "fast_gpio.h"
 #include "pid_controller.h"
 #include "sensor_array.h"
 #include "motor_driver.h"
@@ -60,6 +62,7 @@ void setup() {
 
     Wire.begin(PIN_SDA, PIN_SCL);
     Wire.setClock(I2C_FREQ_HZ);
+    I2CBus::begin();   // must exist before motors.begin()/sensors.beginTask()
 
     if (!mcp.begin_I2C(ADDR_MCP23017, &Wire)) {
         Serial.println("[INIT] MCP23017 not found — check wiring");
@@ -72,6 +75,11 @@ void setup() {
         Serial.println("[INIT] one or more TOF sensors failed");
         while (true) blink(3, 100);
     }
+    // TOF sweep runs continuously on core 0 from here on; the core-1 loop
+    // below only ever reads a snapshot via sensors.getDataSafe(). This
+    // keeps I2C timing jitter (a slow VL53L0X reply, a retried mux write)
+    // off the real-time control path.
+    sensors.beginTask();
     navigator.begin(&encoders);
 
     // Hardware watchdog: resets the MCU if the loop hangs mid-run.
@@ -99,20 +107,25 @@ void loop() {
     float dt = (now - lastLoopMs) / 1000.0f;
     lastLoopMs = now;
 
-    // ---- sense ------------------------------------------------
-    sensors.readAll();
+    // ---- sense --------------------------------------------------------
+    // Sensor sweep runs on core 0 (see sensors.beginTask()); this just
+    // grabs the latest published snapshot under a short spinlock.
+    SensorData snap = sensors.getDataSafe();
     encoders.update(dt);
     batteryV = readBatteryVoltage();
     motors.setBatteryVoltage(batteryV);
 
-    bool startEdge = fsm.startPressed(digitalRead(PIN_START_BTN) == LOW);
+    // Direct-register GPIO: this pin is polled every 10ms tick, so skip
+    // Arduino's digitalRead pin-table lookup.
+    bool rawPressed = !fastPinRead(PIN_START_BTN);
+    bool startEdge = fsm.startPressed(rawPressed);
 
     // ---- state machine -----------------------------------------
     switch (fsm.getState()) {
 
     case STATE_IDLE:
         motors.coast();
-        digitalWrite(PIN_LED, (now / 500) & 1);   // slow blink = ready
+        fastPinWrite(PIN_LED, (now / 500) & 1);   // slow blink = ready
         if (startEdge) fsm.setState(STATE_CALIBRATING);
         break;
 
@@ -123,9 +136,9 @@ void loop() {
         speedPID_L.reset();
         speedPID_R.reset();
         motors.standby(false);
-        digitalWrite(PIN_LED, HIGH);
+        fastPinWrite(PIN_LED, true);
         if (fsm.timeInState() > 1000) {           // 1 s settle, hands clear
-            digitalWrite(PIN_LED, LOW);
+            fastPinWrite(PIN_LED, false);
             fsm.setState(STATE_RUNNING);
         }
         break;
@@ -133,8 +146,7 @@ void loop() {
     case STATE_RUNNING: {
         if (batteryV < BATT_CRIT_V) { enterFault("battery critical"); break; }
 
-        navigator.plan(sensors.getData(),
-                       MODE_SINGLE_PATH ? CRUISE_SPEED_MM_S : EXPLORE_SPEED_MM_S);
+        navigator.plan(snap, MODE_SINGLE_PATH ? CRUISE_SPEED_MM_S : EXPLORE_SPEED_MM_S);
 
         if (navigator.phase() == Navigator::FINISHED) {
             motors.shortBrake();
@@ -156,12 +168,12 @@ void loop() {
 
     case STATE_FINISHED:
         motors.coast();
-        digitalWrite(PIN_LED, (now / 120) & 1);   // fast blink = done
+        fastPinWrite(PIN_LED, (now / 120) & 1);   // fast blink = done
         if (startEdge) fsm.setState(STATE_IDLE);  // re-arm for next round
         break;
 
     case STATE_FAULT:
-        digitalWrite(PIN_LED, (now / 60) & 1);
+        fastPinWrite(PIN_LED, (now / 60) & 1);
         if (startEdge) { motors.standby(false); fsm.setState(STATE_IDLE); }
         break;
 
@@ -176,11 +188,10 @@ void loop() {
     static uint32_t lastTel = 0;
     if (now - lastTel >= 200) {
         lastTel = now;
-        const SensorData& s = sensors.getData();
         Serial.printf("st=%d ph=%d bat=%.2f L=%.0f R=%.0f | %0.f %0.f %0.f %0.f %0.f\n",
                       fsm.getState(), navigator.phase(), batteryV,
                       encoders.getLeftSpeed(), encoders.getRightSpeed(),
-                      s.left, s.diagL, s.front, s.diagR, s.right);
+                      snap.left, snap.diagL, snap.front, snap.diagR, snap.right);
     }
 #endif
 }

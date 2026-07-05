@@ -48,14 +48,41 @@ speed.
   **All I²C peripherals are powered from 3.3 V** — the ESP32-S3 is not 5 V
   tolerant (design brief issue #4, resolved).
 
-### 2.2 Firmware (100 Hz loop)
+### 2.2 Firmware (100 Hz loop, split across both cores)
 
 ```
-sense (TOF sweep, PCNT encoders, battery ADC)
-  → state machine (IDLE / CALIBRATING / RUNNING / FINISHED / FAULT)
-    → navigator (phase machine: FOLLOW → BRAKE_FOR_TURN → PIVOT → EXIT_TURN)
-      → per-wheel speed PID → voltage-compensated PWM → TB6612FNG
+Core 0 (background task)          Core 1 (Arduino loop, 100 Hz)
+─────────────────────────         ──────────────────────────────────
+TOF sweep (5× VL53L0X via   ──▶   getDataSafe() snapshot
+PCA9548A), every ~5 ms             → PCNT encoders, battery ADC
+                                    → state machine (IDLE / CALIBRATING /
+                                       RUNNING / FINISHED / FAULT)
+                                    → navigator (FOLLOW → BRAKE_FOR_TURN →
+                                       PIVOT → EXIT_TURN)
+                                    → per-wheel speed PID → PWM → TB6612FNG
 ```
+
+The I2C sweep runs on its own FreeRTOS task pinned to core 0
+(`SensorArray::beginTask()`), so a slow VL53L0X reply or a bus retry never
+stalls the real-time control loop on core 1. The two cores share one I2C
+bus (sensors behind the PCA9548A mux, motor direction on the MCP23017), so
+every transaction on either core is wrapped in an `I2CGuard` — a FreeRTOS
+mutex (`src/i2c_bus.h`) — and the shared `SensorData` struct is published
+atomically under a spinlock (`portENTER_CRITICAL`/`portMUX_TYPE`) so core 1
+never reads a torn mix of two sweeps. Core 1 only ever reads sensor data
+through `sensors.getDataSafe()`; the raw `getData()` accessor stays
+single-core-only (used during single-threaded `setup()`/`begin()`).
+
+The status LED and start-button — the only two pins still bit-banged from
+the hot loop — go through direct GPIO-register access (`src/fast_gpio.h`:
+`GPIO.out_w1ts`/`out_w1tc` for pins 0–31, `GPIO.out1_w1ts`/`out1_w1tc` for
+pins 32+) instead of Arduino's `digitalWrite`/`digitalRead`, skipping their
+pin-table lookup. Motor PWM stays on `ledcWrite()` — on ESP32 that call
+*is* the direct register write (it sets the LEDC peripheral's duty
+register), the same class of operation as poking `OCR1A` on an AVR
+Timer1; there's no faster path to bypass to without hand-rolling a
+core-version-specific LEDC channel poke for no measurable gain, since PWM
+duty is only written twice per 10 ms tick.
 
 - **Inner loop:** per-motor speed PID on encoder mm/s. Derivative on
   measurement with low-pass filtering (at 450 counts/rev and 100 Hz the

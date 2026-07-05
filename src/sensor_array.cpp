@@ -7,6 +7,8 @@ void SensorArray::selectChannel(uint8_t ch) {
 }
 
 bool SensorArray::begin() {
+    // Runs during single-threaded setup(), before beginTask() exists —
+    // no other core can be touching the bus yet, so no I2CGuard needed here.
     bool ok = true;
     for (uint8_t i = 0; i < NUM_TOF; i++) {
         selectChannel(i);
@@ -22,9 +24,10 @@ bool SensorArray::begin() {
 }
 
 float SensorArray::readOne(uint8_t idx) {
+    I2CGuard guard;  // channel select + read must not interleave with
+                     // MotorDriver's MCP23017 writes on the other core
     selectChannel(idx);
     if (!_tof[idx].isRangeComplete()) {
-        // Result not ready yet — keep previous value, mark stale.
         _data.valid[idx] = false;
         return NAN;
     }
@@ -37,9 +40,39 @@ float SensorArray::readOne(uint8_t idx) {
 
 void SensorArray::readAll() {
     float v;
-    if (!isnan(v = readOne(CH_TOF_LEFT)))   _data.left  = v;
-    if (!isnan(v = readOne(CH_TOF_DIAG_L))) _data.diagL = v;
-    if (!isnan(v = readOne(CH_TOF_FRONT)))  _data.front = v;
-    if (!isnan(v = readOne(CH_TOF_DIAG_R))) _data.diagR = v;
-    if (!isnan(v = readOne(CH_TOF_RIGHT)))  _data.right = v;
+    float left = _data.left, diagL = _data.diagL, front = _data.front,
+          diagR = _data.diagR, right = _data.right;
+
+    if (!isnan(v = readOne(CH_TOF_LEFT)))   left  = v;
+    if (!isnan(v = readOne(CH_TOF_DIAG_L))) diagL = v;
+    if (!isnan(v = readOne(CH_TOF_FRONT)))  front = v;
+    if (!isnan(v = readOne(CH_TOF_DIAG_R))) diagR = v;
+    if (!isnan(v = readOne(CH_TOF_RIGHT)))  right = v;
+
+    // Publish the whole sweep as one atomic update — a consumer on the
+    // other core should never see a mix of this sweep and the last one.
+    portENTER_CRITICAL(&_dataMux);
+    _data.left = left; _data.diagL = diagL; _data.front = front;
+    _data.diagR = diagR; _data.right = right;
+    portEXIT_CRITICAL(&_dataMux);
+}
+
+SensorData SensorArray::getDataSafe() const {
+    SensorData snapshot;
+    portENTER_CRITICAL(&_dataMux);
+    snapshot = _data;
+    portEXIT_CRITICAL(&_dataMux);
+    return snapshot;
+}
+
+void SensorArray::taskFn(void* param) {
+    SensorArray* self = static_cast<SensorArray*>(param);
+    for (;;) {
+        self->readAll();
+        vTaskDelay(pdMS_TO_TICKS(5)); // sensors range every 20ms; poll faster than that
+    }
+}
+
+void SensorArray::beginTask() {
+    xTaskCreatePinnedToCore(taskFn, "tof_sensors", 4096, this, 1, nullptr, 0);
 }
