@@ -75,10 +75,15 @@ void setup() {
     navigator.begin(&encoders);
 
     // Hardware watchdog: resets the MCU if the loop hangs mid-run.
-    esp_task_wdt_config_t wdt = { .timeout_ms = 500,
+    // (API differs between Arduino-ESP32 core 2.x and 3.x)
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    esp_task_wdt_config_t wdt = { .timeout_ms = 1000,
                                   .idle_core_mask = 0,
                                   .trigger_panic = true };
     esp_task_wdt_reconfigure(&wdt);
+#else
+    esp_task_wdt_init(1, true);   // 1 s timeout, panic → reset
+#endif
     esp_task_wdt_add(nullptr);
 
     fsm.setState(STATE_IDLE);

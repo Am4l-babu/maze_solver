@@ -3,15 +3,32 @@
 static constexpr uint32_t PWM_FREQ_HZ = 20000; // above audible, well under TB6612's 100 kHz
 static constexpr uint8_t  PWM_RES_BITS = 8;
 
+// LEDC API changed between Arduino-ESP32 core 2.x (channel-based) and
+// 3.x (pin-based) — support both.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+static void pwmInit(uint8_t pin)               { ledcAttach(pin, PWM_FREQ_HZ, PWM_RES_BITS); }
+static void pwmWrite(uint8_t pin, uint32_t d)  { ledcWrite(pin, d); }
+#else
+static constexpr uint8_t CH_L = 0, CH_R = 1;
+static void pwmInit(uint8_t pin) {
+    uint8_t ch = (pin == PIN_PWM_L) ? CH_L : CH_R;
+    ledcSetup(ch, PWM_FREQ_HZ, PWM_RES_BITS);
+    ledcAttachPin(pin, ch);
+}
+static void pwmWrite(uint8_t pin, uint32_t d) {
+    ledcWrite((pin == PIN_PWM_L) ? CH_L : CH_R, d);
+}
+#endif
+
 bool MotorDriver::begin(Adafruit_MCP23X17* mcp) {
     _mcp = mcp;
     for (uint8_t p : {MCP_AIN1, MCP_AIN2, MCP_BIN1, MCP_BIN2, MCP_STBY})
         _mcp->pinMode(p, OUTPUT);
 
-    ledcAttach(PIN_PWM_L, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcAttach(PIN_PWM_R, PWM_FREQ_HZ, PWM_RES_BITS);
-    ledcWrite(PIN_PWM_L, 0);
-    ledcWrite(PIN_PWM_R, 0);
+    pwmInit(PIN_PWM_L);
+    pwmInit(PIN_PWM_R);
+    pwmWrite(PIN_PWM_L, 0);
+    pwmWrite(PIN_PWM_R, 0);
 
     coast();
     standby(false);          // STBY high = driver enabled
@@ -40,11 +57,11 @@ void MotorDriver::apply(uint8_t pwmPin, bool isLeft, float pwm) {
 
     if (fabsf(pwm) < 1.0f) {
         writeDir(isLeft, COAST);
-        ledcWrite(pwmPin, 0);
+        pwmWrite(pwmPin, 0);
         return;
     }
     writeDir(isLeft, pwm > 0 ? FWD : REV);
-    ledcWrite(pwmPin, (uint32_t)fabsf(pwm));
+    pwmWrite(pwmPin, (uint32_t)fabsf(pwm));
 }
 
 void MotorDriver::setLeft(float pwm)  { apply(PIN_PWM_L, true,  pwm); }
@@ -54,15 +71,15 @@ void MotorDriver::shortBrake() {
     writeDir(true,  BRAKE);
     writeDir(false, BRAKE);
     // Full PWM in short-brake mode = strongest braking on TB6612
-    ledcWrite(PIN_PWM_L, 255);
-    ledcWrite(PIN_PWM_R, 255);
+    pwmWrite(PIN_PWM_L, 255);
+    pwmWrite(PIN_PWM_R, 255);
 }
 
 void MotorDriver::coast() {
     writeDir(true,  COAST);
     writeDir(false, COAST);
-    ledcWrite(PIN_PWM_L, 0);
-    ledcWrite(PIN_PWM_R, 0);
+    pwmWrite(PIN_PWM_L, 0);
+    pwmWrite(PIN_PWM_R, 0);
 }
 
 void MotorDriver::standby(bool en) {
