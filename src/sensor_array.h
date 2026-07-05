@@ -7,9 +7,9 @@
 // Distances in millimetres. Out-of-range reads are clamped to RANGE_MAX.
 struct SensorData {
     float left   = 0;   // -90°
-    float diagL  = 0;   // -45°
+    float diagL  = 0;   // -30°
     float front  = 0;   //   0°
-    float diagR  = 0;   // +45°
+    float diagR  = 0;   // +30°
     float right  = 0;   // +90°
     bool  valid[NUM_TOF] = {false, false, false, false, false};
 };

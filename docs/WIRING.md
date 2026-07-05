@@ -52,12 +52,64 @@
 | Channel | Sensor | Angle |
 |---|---|---|
 | CH0 | TOF-0 | −90° left |
-| CH1 | TOF-1 | −45° diag-left (15° printed blinder) |
-| CH2 | TOF-2 | 0° front (blinder) |
-| CH3 | TOF-3 | +45° diag-right (blinder) |
+| CH1 | TOF-1 | −30° diag-left (15° printed shroud) |
+| CH2 | TOF-2 | 0° front (shroud) |
+| CH3 | TOF-3 | +30° diag-right (shroud) |
 | CH4 | TOF-4 | +90° right |
 
 All five sensors keep default address 0x29 — the mux isolates them.
+
+**Why 30°, not 45°:** this track is a single 230 mm-wide corridor with corner
+turns only — no side junctions. The diagonal sensors' job is to see the
+upcoming corner as early as possible, not to peek into an adjacent branch.
+The forward lead-distance a diagonal sensor buys before it detects an
+opening scales with `1/tan(θ)` from the direction of travel, so a shallower
+angle gives meaningfully more warning (30° gives ~1.7× the lead time of
+45°) at the same lateral wall clearance. Below ~25° the wall return gets
+unreliable (angle of incidence to the wall approaches grazing), so 30° is
+the practical floor without more aggressive tuning.
+
+## FOV-limiting shroud (blinder)
+
+The VL53L0X's native field of view is ~25° — wide enough that, at 30°
+mounting spacing, the front (0°) and diagonal beams would otherwise
+overlap. A printed aperture tube in front of each of the −30°/0°/+30°
+sensors narrows the FOV and stops the cross-talk. The ±90° side sensors
+don't need one — nothing else shares their beam path.
+
+Tube length for a target full-angle FOV:
+
+```
+L = D / (2 · tan(FOV/2))
+```
+
+`D` = the sensor's combined emitter+receiver window diameter (measure it —
+don't assume). For a 15° FOV target:
+
+| D | L |
+|---|---|
+| 4.0 mm | 15.2 mm |
+| 4.4 mm | 16.7 mm |
+| 5.0 mm | 19.0 mm |
+
+Even at 30° mounting spacing, a 15° shroud leaves ~15° of clear angular
+margin before adjacent beams touch — no need to go narrower than the
+original spec.
+
+Build notes:
+- Print the whole front bumper as one piece with all five bores at their
+  mounted angles — guarantees the angles match and is far easier to align
+  than five loose tubes.
+- Matte-black filament alone isn't enough — flat-black spray paint or
+  flocking the bore kills specular IR bounce that plain FDM walls still
+  produce.
+- Ream the bore with a drill bit sized to `D` after printing — layer lines
+  inside a small bore scatter light and quietly widen the effective FOV.
+- Seal the tube base against the sensor module with a thin foam gasket so
+  stray light can't sneak in around the sides.
+- Bench-test before final assembly: sweep a target across the calculated
+  cutoff angle and confirm the reading snaps from real-distance to
+  no-target right at the edge; lengthen the tube if it doesn't.
 
 ## EMI countermeasures (do these BEFORE debugging weird bugs)
 

@@ -38,9 +38,11 @@
 
 // ---------------- PCA9548A channels --------------------------
 #define CH_TOF_LEFT    0     // -90°
-#define CH_TOF_DIAG_L  1     // -45°
+#define CH_TOF_DIAG_L  1     // -30° (shallow, not -45°: buys more corner
+                             // lead-time in this narrow single-path track
+                             // — see docs/WIRING.md "FOV-limiting shroud")
 #define CH_TOF_FRONT   2     //   0°
-#define CH_TOF_DIAG_R  3     // +45°
+#define CH_TOF_DIAG_R  3     // +30°
 #define CH_TOF_RIGHT   4     // +90°
 #define NUM_TOF        5
 

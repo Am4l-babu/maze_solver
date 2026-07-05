@@ -73,6 +73,28 @@ sense (TOF sweep, PCNT encoders, battery ADC)
   low-voltage fault stop; PWM voltage compensation (11.1 V / V_batt) so PID
   tuning holds as the pack sags across three back-to-back runs.
 
+### 2.4 Diagonal sensor angle & FOV shroud (revised)
+
+The original brief mounted the diagonal sensors at ±45°, borrowed from
+classic micromouse practice where they peek into an adjacent cell's
+junction. This event has no junctions — only corner turns in a single
+230 mm-wide corridor — so the diagonals were re-angled to **±30°**.
+
+The forward lead-distance before a diagonal beam detects an opening scales
+with `1/tan(θ)` from the direction of travel: 30° gives roughly 1.7× the
+warning distance of 45° at the same lateral clearance, which is exactly
+what `BRAKE_FOR_TURN` in `navigator.cpp` needs to start its v² braking
+profile earlier and with more confidence about turn direction. Going
+shallower than ~25° starts to hurt — the beam's angle of incidence on the
+side wall approaches grazing, and return strength drops.
+
+Tightening the mounting angle also tightens the margin against the front
+sensor's beam, so the printed blinders became a proper **FOV-limiting
+shroud** rather than a rough baffle: an aperture tube sized by
+`L = D / (2·tan(FOV/2))` for a 15° target FOV. Even at 30° spacing this
+still leaves ~15° of clear margin before beams touch — full build spec and
+the tube-length table are in `docs/WIRING.md`.
+
 ### 2.3 Fallback: classic maze mode
 
 `maze_map.*` implements wall mapping + BFS flood fill + straight-preferring
