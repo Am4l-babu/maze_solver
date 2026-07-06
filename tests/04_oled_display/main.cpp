@@ -1,14 +1,18 @@
 // ============================================================
 // TEST 04 — SSD1306 0.96" I2C OLED (128x64) bring-up
-// New component, not yet wired into the main robot firmware.
-// Runs a splash screen, a full-frame test pattern (corners +
-// border, to catch column/row offset issues), then a live
-// counter so you can confirm the refresh isn't hanging.
+//
+// Actual intended role on the robot: setup/calibration screens and
+// a persisted "total runtime" hour-meter. NOT a live in-run display —
+// it is never updated while the robot is in STATE_RUNNING, so it can
+// never compete with the TOF sensor sweep for I2C bus time during a
+// timed run. This test's demo reflects that: a splash + test pattern
+// at boot, then a slow (1 Hz) runtime counter — nothing high-frequency.
 // ============================================================
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Preferences.h>
 
 #define PIN_SDA 5   // XIAO D4 / GPIO5 — shared main I2C bus
 #define PIN_SCL 6   // XIAO D5 / GPIO6
@@ -18,7 +22,14 @@
 
 // Most 0.96" blue SSD1306 boards are 0x3C; some clones ship as 0x3D.
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
+Preferences prefs;
 uint8_t foundAddr = 0;
+
+// Persisted lifetime "hour-meter" — survives power cycles via NVS flash.
+// Written once per second here for the demo; a real deployment should
+// throttle this further (e.g. every 60s) to reduce flash wear.
+uint32_t totalRuntimeS = 0;
+uint32_t sessionStartS = 0;
 
 bool tryInit(uint8_t addr) {
     if (display.begin(SSD1306_SWITCHCAPVCC, addr)) {
@@ -28,10 +39,32 @@ bool tryInit(uint8_t addr) {
     return false;
 }
 
+void drawRuntimeScreen() {
+    uint32_t sessionS = (millis() / 1000) - sessionStartS;
+    uint32_t liveTotal = totalRuntimeS + sessionS;
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.println("MICRO-MAZE SOLVER");
+    display.drawFastHLine(0, 10, SCREEN_W, SSD1306_WHITE);
+
+    display.setCursor(0, 18);
+    display.println("Total runtime:");
+    display.setTextSize(2);
+    display.setCursor(0, 28);
+    display.printf("%luh%02lum%02lus\n", liveTotal / 3600, (liveTotal / 60) % 60, liveTotal % 60);
+
+    display.setTextSize(1);
+    display.setCursor(0, 52);
+    display.printf("this session: %lus", sessionS);
+    display.display();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(300);
-    Serial.println("[TEST] SSD1306 128x64 OLED");
+    Serial.println("[TEST] SSD1306 128x64 OLED — setup screens + runtime hour-meter");
 
     Wire.begin(PIN_SDA, PIN_SCL);
     Wire.setClock(400000);
@@ -43,7 +76,14 @@ void setup() {
     }
     Serial.printf("[OK] SSD1306 found at 0x%02X\n", foundAddr);
 
-    // --- splash screen ---
+    prefs.begin("mms", false);
+    totalRuntimeS = prefs.getUInt("runtime_s", 0);
+    sessionStartS = millis() / 1000;
+    Serial.printf("[OK] loaded persisted runtime: %lu s (%luh%02lum%02lus)\n",
+                  totalRuntimeS, totalRuntimeS / 3600, (totalRuntimeS / 60) % 60,
+                  totalRuntimeS % 60);
+
+    // --- splash screen ("setup" role #1) ---
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     display.setTextSize(1);
@@ -69,30 +109,21 @@ void setup() {
     display.println("PATTERN");
     display.display();
     delay(2000);
+
+    Serial.println("[TEST] entering runtime-counter screen (updates once/sec, "
+                    "not continuously — this is intentional, see README).");
 }
 
 void loop() {
-    static uint32_t frame = 0;
-    static uint32_t lastMs = 0;
+    static uint32_t lastUpdateMs = 0;
     uint32_t now = millis();
-    if (now - lastMs < 200) return;
-    lastMs = now;
-    frame++;
+    if (now - lastUpdateMs < 1000) return; // 1 Hz — this is not a live display
+    lastUpdateMs = now;
 
-    // Live counter + a moving bar, so a hang shows up immediately as a
-    // frozen screen instead of a subtle no-op.
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.println("LIVE REFRESH TEST");
-    display.setCursor(0, 16);
-    display.printf("frame: %lu", frame);
-    display.setCursor(0, 28);
-    display.printf("uptime: %lus", now / 1000);
+    drawRuntimeScreen();
 
-    int barX = (frame * 4) % (SCREEN_W - 10);
-    display.fillRect(barX, 48, 10, 10, SSD1306_WHITE);
-    display.drawRect(0, 48, SCREEN_W, 10, SSD1306_WHITE);
-
-    display.display();
+    // Persist the running total once per second for this demo. On the
+    // real robot, throttle this to ~once/minute to limit flash wear.
+    uint32_t sessionS = (now / 1000) - sessionStartS;
+    prefs.putUInt("runtime_s", totalRuntimeS + sessionS);
 }

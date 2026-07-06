@@ -83,13 +83,20 @@ Ideas that came directly out of *building* these tests — not
 speculative, things that are one step away from being real:
 
 ### Near-term (cheap, high value)
-- **Wire the OLED onto the real robot.** It's proven standalone in test
-  04 and costs 20mA on a rail that's barely loaded. Natural first use:
-  show current state (IDLE/RUNNING/FAULT), battery voltage, and a 5-bar
-  mini bar-graph of the live sensor array — genuinely useful for
-  debugging a bad run without a laptop tethered to the bot. Rate-limit
-  the `display.display()` push to ~5-10Hz so it doesn't compete with the
-  TOF sweep for I²C bus time (see `tests/04_oled_display/README.md`).
+- **Port the validated XSHUT sensor design into `src/`.** Tests 01/02
+  prove all 5 VL53L0X sensors work directly on the bus with no mux —
+  `src/sensor_array.cpp` still implements the older PCA9548A design.
+  Once you're confident in the test rig, migrate `config.h` (drop
+  `ADDR_PCA9548A`, add the XSHUT pin map + new addresses) and
+  `sensor_array.cpp` (boot-time re-address sequence instead of
+  per-read channel select) to match. One less physical component on
+  the real robot once this lands.
+- **Keep the OLED to setup/idle only, as tested.** Test 04 already
+  reflects the real intended role — splash + test pattern at boot, then
+  a 1Hz total-runtime hour-meter (persisted via NVS) — and is
+  deliberately never updated during `STATE_RUNNING`. If you do wire it
+  into `src/`, keep that constraint: call into it only from
+  `IDLE`/`CALIBRATING`/`FINISHED`, never from the 100Hz control path.
 - **Automate the gear-ratio check.** Test 03 already prints raw encoder
   counts alongside computed distance — a 10-second script that spins the
   wheel a commanded number of turns and computes the *actual* ratio
@@ -98,14 +105,15 @@ speculative, things that are one step away from being real:
   individually, a combined sketch that reads all sensors + both encoders
   + the button simultaneously (no motor movement) would catch the one
   class of bug individual tests can't: **I²C bus contention** between the
-  TOF mux and the MCP23017 when both are hammered at once — exactly the
-  scenario the main firmware's dual-core split (`I2CGuard` in
-  `src/i2c_bus.h`) was built to handle safely.
+  continuous VL53L0X polling and the MCP23017 motor-direction/XSHUT
+  writes when both are hammered at once — exactly the scenario the main
+  firmware's dual-core split (`I2CGuard` in `src/i2c_bus.h`) was built
+  to handle safely.
 
 ### Medium-term (real feature work)
-- **IMU bring-up test**, once a BNO055/MPU6050 is wired to a spare mux
-  channel — gyro-closed pivots are the biggest accuracy upgrade available
-  for the 90° turns, per `docs/REPORT.md` §5.
+- **IMU bring-up test**, once a BNO055/MPU6050 is wired to a spare
+  MCP23017/GPIO pin — gyro-closed pivots are the biggest accuracy
+  upgrade available for the 90° turns, per `docs/REPORT.md` §5.
 - **Long-press on the start button → settings mode.** Test 05 already
   classifies short vs. long presses (600ms threshold) even though the
   main firmware only currently uses press *edges*. A long-press could

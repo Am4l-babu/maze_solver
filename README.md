@@ -24,7 +24,7 @@ Navigate a **single-path maze** without wall contact. Every touch forfeits that 
 | Subsystem | Part | Notes |
 |-----------|------|-------|
 | **Brain** | XIAO ESP32S3 | 240 MHz dual-core, hardware quadrature decode |
-| **Eyes** | 5× VL53L0X (TOF200C) | ±90°, ±30°, 0° with FOV-limiting shrouds |
+| **Eyes** | 5× VL53L0X | ±90°, ±30°, 0° with FOV-limiting shrouds |
 | **Drive** | TB6612FNG + 2× N20 gearmotor | 150:1, active short-brake for stopping |
 | **Wheels** | 2× ⌀43 mm + front caster | Differential drive, ~95 mm wheelbase |
 | **Power** | 3S LiPo 1000 mAh | Single battery → 5V buck → 3.3V LDO → all logic |
@@ -95,7 +95,7 @@ src/
 ├── main.cpp              ← 100 Hz control loop, state machine
 ├── config.h              ← ALL tuning knobs + physical constants
 ├── pid_controller.*      ← Generic PID (anti-windup, filtered D)
-├── sensor_array.*        ← 5× VL53L0X via PCA9548A mux, core-0 task
+├── sensor_array.*        ← 5× VL53L0X via PCA9548A mux, core-0 task (pending XSHUT migration, see docs/CONNECTIONS.md)
 ├── motor_driver.*        ← TB6612FNG + MCP23017 direction pins
 ├── encoder.*             ← Hardware PCNT quadrature → mm/s
 ├── navigator.*           ← Corridor centering, braking, pivots
@@ -107,7 +107,7 @@ src/
 tests/                    ← Standalone hardware bring-up sketches
 ├── README.md             ← Test order, suggestions & upgrades
 ├── 01_lidar_single/      ← One bare VL53L0X, no mux
-├── 02_lidar_array/       ← All 5 sensors + PCA9548A mux
+├── 02_lidar_array/       ← All 5 sensors via XSHUT re-addressing (no mux)
 ├── 03_motor_encoder/     ← Forward/back/speed, gear-ratio check
 ├── 04_oled_display/      ← SSD1306 128×64 status display (new)
 └── 05_push_button/       ← Start-button debounce & wiring
