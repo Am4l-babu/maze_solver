@@ -88,11 +88,29 @@ the practical floor without more aggressive tuning.
 
 ## FOV-limiting shroud (blinder)
 
-The VL53L0X's native field of view is ~25° — wide enough that, at 30°
-mounting spacing, the front (0°) and diagonal beams would otherwise
-overlap. A printed aperture tube in front of each of the −30°/0°/+30°
-sensors narrows the FOV and stops the cross-talk. The ±90° side sensors
-don't need one — nothing else shares their beam path.
+The VL53L0X's native field of view is **25°, confirmed exactly** by the
+datasheet (DocID029104 Rev 2, `docs/VL53L0X.pdf`) — every ranging/accuracy
+table in it is qualified "for a complete Field Of View covered (FOV =
+25°)". At 30° mounting spacing, the front (0°) and diagonal beams would
+otherwise overlap. A printed aperture tube in front of each of the
+−30°/0°/+30° sensors narrows the FOV and stops the cross-talk. The ±90°
+side sensors don't need one — nothing else shares their beam path.
+
+Two things the datasheet confirms about *how* to build this tube:
+- **Leave it open — no lens, no clear cover, no printed window across the
+  bore.** §2.3.3 defines the sensor's own "cross-talk" as *the signal
+  return from a cover glass* above the module, which corrupts every
+  reading unless you run ST's factory offset+crosstalk calibration to
+  compensate. An open matte-black aperture (just air) sidesteps that
+  failure mode instead of needing per-sensor software correction for it.
+- **Don't narrow past 15°.** Table 11's max-range figures — quoted at
+  the *full* 25° FOV — already drop to 70-80cm typical against a grey/
+  17%-reflectance target (closer to a painted maze wall than the 200cm+
+  a white target gets). Narrowing the aperture further shrinks the
+  solid angle of light collected on top of that already-limited budget.
+  15° leaves ~15° of angular margin against 30°-spaced beams without
+  stacking extra signal loss on a target that's already reflectance-
+  limited.
 
 Tube length for a target full-angle FOV:
 
